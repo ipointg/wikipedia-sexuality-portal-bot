@@ -1,0 +1,62 @@
+name: Update sexuality portal
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    - cron: "15 6 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create Pywikibot config
+        env:
+          WIKI_USERNAME: ${{ secrets.WIKI_USERNAME }}
+          WIKI_BOT_SUFFIX: ${{ secrets.WIKI_BOT_SUFFIX }}
+          WIKI_BOT_PASSWORD: ${{ secrets.WIKI_BOT_PASSWORD }}
+        run: |
+          cat > user-config.py <<EOF
+          family = 'wikipedia'
+          mylang = 'uk'
+          usernames['wikipedia']['uk'] = '${WIKI_USERNAME}'
+          password_file = 'user-password.cfg'
+          EOF
+
+          cat > user-password.cfg <<EOF
+          ('${WIKI_USERNAME}', BotPassword('${WIKI_BOT_SUFFIX}', '${WIKI_BOT_PASSWORD}'))
+          EOF
+
+      - name: Run bot
+        env:
+          PYWIKIBOT_DIR: ${{ github.workspace }}
+        run: python sexuality_portal.py
+
+      - name: Save updated cache
+        run: |
+          git config user.name "sexuality-portal-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add cache/
+
+          if git diff --cached --quiet; then
+            echo "Cache unchanged"
+          else
+            git commit -m "Update portal cache"
+            git push
+          fi
