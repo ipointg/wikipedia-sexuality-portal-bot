@@ -494,20 +494,19 @@ def get_recent_changes(
     since_timestamp
 ):
     """
-    Отримує зміни від останньої
-    синхронізації до поточного часу.
+    Отримує лише зміни, які реально можуть
+    впливати на наш портал:
 
-    Namespace:
-      0  = статті
-      4  = Вікіпедія
-      14 = категорії
+    - categorize: додавання/видалення сторінок із категорій
+    - edit/new у просторі Вікіпедія для архівів «Чи знаєте ви»
+
+    Це значно зменшує кількість API-запитів.
     """
 
     if not since_timestamp:
         return []
 
     changes = []
-
     rccontinue = None
 
     while True:
@@ -517,9 +516,19 @@ def get_recent_changes(
             "rcstart": since_timestamp,
             "rcdir": "newer",
             "rclimit": "max",
+
+            # Нам потрібні:
+            # 0  = статті
+            # 4  = Вікіпедія
+            # 14 = категорії
             "rcnamespace": "0|4|14",
+
+            # Ключова оптимізація:
+            # не тягнемо всі звичайні редагування статей.
+            "rctype": "categorize|edit|new",
+
             "rcprop": (
-                "title|timestamp|ids|flags"
+                "title|timestamp|ids"
             ),
         }
 
@@ -564,28 +573,6 @@ def get_recent_changes(
 # ---------------------------------------------------------
 # DETECT RELEVANT CHANGES
 # ---------------------------------------------------------
-
-def article_current_categories(
-    title
-):
-    page = pywikibot.Page(
-        SITE,
-        title
-    )
-
-    if not page.exists():
-        return set()
-
-    try:
-        return {
-            category.title()
-            for category
-            in page.categories()
-        }
-
-    except Exception:
-        return set()
-
 
 def analyse_changes(
     changes,
@@ -647,25 +634,9 @@ def analyse_changes(
         if ":" in title:
             continue
 
-        # Стаття вже є у тематичному
-        # provenance — могла змінити
-        # категоризацію.
-        if title in tracked_articles:
-            provenance_dirty = True
-            continue
-
-        # Нова/раніше нетематична стаття
-        # могла бути додана до нашого дерева.
-        categories = (
-            article_current_categories(
-                title
-            )
-        )
-
-        if (
-            categories
-            & tracked_categories
-        ):
+        # Зміни категоризації приходять окремим
+        # recentchanges type="categorize".
+        if change.get("type") == "categorize":
             provenance_dirty = True
 
     return (
