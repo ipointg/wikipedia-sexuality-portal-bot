@@ -476,10 +476,439 @@ def get_tracked_categories(
 
     return result
 
+def build_category_paths(
+    provenance
+):
+    """
+    Будує індекс:
 
-# ---------------------------------------------------------
-# RECENT CHANGES API
-# ---------------------------------------------------------
+    назва категорії ->
+    всі відомі шляхи до неї
+    у тематичному дереві.
+    """
+
+    result = {}
+
+    for paths in provenance.values():
+        for path in paths:
+            parts = path.split(
+                " > "
+            )
+
+            for i, category in enumerate(
+                parts
+            ):
+                prefix = " > ".join(
+                    parts[:i + 1]
+                )
+
+                result.setdefault(
+                    category,
+                    set()
+                ).add(
+                    prefix
+                )
+
+    # Кореневі категорії повинні
+    # бути відомі навіть якщо в них
+    # зараз немає статей.
+    for root in ROOT_CATEGORIES:
+        clean = root.removeprefix(
+            "Категорія:"
+        )
+
+        result.setdefault(
+            clean,
+            set()
+        ).add(
+            clean
+        )
+
+    return result
+
+
+def refresh_article_provenance(title, provenance, category_paths):
+    """Оновлює provenance однієї статті. Повертає True/False."""
+    page = pywikibot.Page(SITE, title)
+
+    try:
+        if not page.exists():
+            provenance.pop(title, None)
+            return True
+
+        categories = {
+            category.title().removeprefix("Категорія:")
+            for category in page.categories()
+        }
+    except Exception as exc:
+        print(f"Не вдалося прочитати категорії {title}: {exc}")
+        return False
+
+    new_paths = set()
+
+    for category in categories:
+        new_paths.update(category_paths.get(category, []))
+
+    if new_paths:
+        provenance[title] = sorted(new_paths)
+    else:
+        provenance.pop(title, None)
+
+    return True
+
+def remove_category_branch_paths(
+    category_name,
+    provenance
+):
+    """
+    Прибирає зі старого provenance
+    лише шляхи, які проходять через
+    конкретну категорію.
+
+    Інші незалежні тематичні шляхи
+    тієї самої статті зберігаються.
+    """
+
+    for article in list(
+        provenance.keys()
+    ):
+        paths = provenance[
+            article
+        ]
+
+        remaining = []
+
+        for path in paths:
+            parts = path.split(
+                " > "
+            )
+
+            if category_name not in parts:
+                remaining.append(
+                    path
+                )
+
+        if remaining:
+            provenance[
+                article
+            ] = remaining
+        else:
+            del provenance[
+                article
+            ]
+
+
+def batch_page_categories(titles):
+    """
+    Повертає категорії для набору сторінок пакетними API-запитами.
+
+    Це принципово важливо для RecentChanges: замість одного запиту
+    на кожну змінену сторінку ми перевіряємо до 50 сторінок за раз.
+
+    Повертає dict {title: set(category_titles)} або None при помилці.
+    """
+    titles = sorted(set(titles))
+
+    if not titles:
+        return {}
+
+    result = {
+        title: set()
+        for title in titles
+    }
+
+    batch_size = 50
+
+    for offset in range(0, len(titles), batch_size):
+        batch = titles[offset:offset + batch_size]
+        clcontinue = None
+
+        while True:
+            params = {
+                "action": "query",
+                "prop": "categories",
+                "titles": "|".join(batch),
+                "cllimit": "max",
+                "redirects": 1,
+            }
+
+            if clcontinue:
+                params["clcontinue"] = clcontinue
+
+            try:
+                data = SITE.simple_request(**params).submit()
+            except Exception as exc:
+                print(
+                    "Не вдалося пакетно прочитати категорії: "
+                    f"{exc}"
+                )
+                return None
+
+            query = data.get("query", {})
+            pages = query.get("pages", {})
+
+            # API може нормалізувати або редиректити назви.
+            normalized = {
+                item.get("to"): item.get("from")
+                for item in query.get("normalized", [])
+                if item.get("to") and item.get("from")
+            }
+            redirects = {
+                item.get("to"): item.get("from")
+                for item in query.get("redirects", [])
+                if item.get("to") and item.get("from")
+            }
+
+            for page_data in pages.values():
+                api_title = page_data.get("title")
+                if not api_title:
+                    continue
+
+                original_title = (
+                    redirects.get(api_title)
+                    or normalized.get(api_title)
+                    or api_title
+                )
+
+                if original_title not in result:
+                    # У рідкісному випадку подвійної нормалізації
+                    # прив'язуємо до API title, щоб дані не загубилися.
+                    original_title = api_title
+                    result.setdefault(original_title, set())
+
+                for category in page_data.get("categories", []):
+                    category_title = category.get("title")
+                    if category_title:
+                        result[original_title].add(category_title)
+
+            continuation = data.get("continue")
+            if not continuation:
+                break
+
+            clcontinue = continuation.get("clcontinue")
+            if not clcontinue:
+                break
+
+    return result
+
+
+def classify_dirty_categories(dirty_categories, provenance):
+    """
+    Визначає релевантні змінені категорії.
+
+    Уже відомі категорії визначаються локально без API.
+    Невідомі категорії перевіряються пакетно: релевантною вважається
+    лише категорія, яка зараз має відомого тематичного parent.
+
+    Повертає list або None при помилці API.
+    """
+    tracked_categories = get_tracked_categories(provenance)
+
+    known = sorted(
+        title
+        for title in dirty_categories
+        if title in tracked_categories
+        or title in ROOT_CATEGORIES
+    )
+
+    unknown = sorted(
+        set(dirty_categories)
+        - set(known)
+    )
+
+    relevant = list(known)
+
+    if not unknown:
+        return relevant
+
+    parents_by_category = batch_page_categories(unknown)
+
+    if parents_by_category is None:
+        return None
+
+    ignored_count = 0
+
+    for category_title in unknown:
+        parents = parents_by_category.get(
+            category_title,
+            set()
+        )
+
+        if parents & tracked_categories:
+            relevant.append(category_title)
+        else:
+            ignored_count += 1
+
+    if ignored_count:
+        print(
+            "Ігнорую сторонні категорії: "
+            f"{ignored_count}"
+        )
+
+    return sorted(set(relevant))
+
+
+def classify_dirty_articles(dirty_articles, provenance, category_paths):
+    """
+    Визначає релевантні змінені статті.
+
+    Статті, які вже є в provenance, релевантні одразу.
+    Решта перевіряється пакетно за поточними категоріями.
+
+    Повертає list або None при помилці API.
+    """
+    tracked_articles = set(provenance)
+
+    known = sorted(
+        title
+        for title in dirty_articles
+        if title in tracked_articles
+    )
+
+    unknown = sorted(
+        set(dirty_articles)
+        - set(known)
+    )
+
+    relevant = list(known)
+
+    if not unknown:
+        return relevant
+
+    categories_by_article = batch_page_categories(unknown)
+
+    if categories_by_article is None:
+        return None
+
+    tracked_category_titles = {
+        "Категорія:" + category_name
+        for category_name in category_paths
+    }
+
+    for title in unknown:
+        categories = categories_by_article.get(
+            title,
+            set()
+        )
+
+        if categories & tracked_category_titles:
+            relevant.append(title)
+
+    return sorted(set(relevant))
+
+
+def refresh_category_branch(category_title, provenance):
+    """
+    Оновлює тільки одну ВЖЕ РЕЛЕВАНТНУ тематичну гілку.
+
+    Невідома нетематична категорія не є причиною для повного
+    rebuild. False повертається лише при реальній помилці API.
+    """
+    category_name = category_title.removeprefix("Категорія:")
+    category_paths = build_category_paths(provenance)
+    old_paths = set(category_paths.get(category_name, []))
+
+    category = pywikibot.Category(SITE, category_title)
+
+    try:
+        exists = category.exists()
+    except Exception as exc:
+        print(f"Не вдалося перевірити {category_title}: {exc}")
+        return False
+
+    if not exists:
+        if old_paths:
+            remove_category_branch_paths(category_name, provenance)
+        return True
+
+    new_paths = set()
+
+    if category_title in ROOT_CATEGORIES:
+        new_paths.add(category_name)
+
+    try:
+        parents = list(category.categories())
+    except Exception as exc:
+        print(f"Не вдалося прочитати {category_title}: {exc}")
+        return False
+
+    for parent in parents:
+        parent_name = parent.title().removeprefix("Категорія:")
+
+        for parent_path in category_paths.get(parent_name, []):
+            parent_depth = len(parent_path.split(" > ")) - 1
+
+            if parent_depth < MAX_CATEGORY_DEPTH:
+                new_paths.add(parent_path + " > " + category_name)
+
+    # Якщо категорія була тематичною, але тепер втратила
+    # тематичного батька — видаляємо її стару гілку.
+    if not new_paths:
+        if old_paths:
+            remove_category_branch_paths(category_name, provenance)
+        return True
+
+    remove_category_branch_paths(category_name, provenance)
+    visited = set()
+
+    def walk(current_category, depth, current_path):
+        key = (
+            current_category.title(),
+            depth,
+            tuple(current_path),
+        )
+
+        if key in visited:
+            return True
+
+        visited.add(key)
+        path_string = " > ".join(current_path)
+
+        try:
+            for article in current_category.articles(namespaces=0):
+                title = normalize_title(article.title())
+                provenance.setdefault(title, [])
+
+                if path_string not in provenance[title]:
+                    provenance[title].append(path_string)
+        except Exception as exc:
+            print(
+                f"Помилка читання {current_category.title()}: {exc}"
+            )
+            return False
+
+        if depth >= MAX_CATEGORY_DEPTH:
+            return True
+
+        try:
+            subcategories = list(current_category.subcategories())
+        except Exception as exc:
+            print(
+                f"Помилка підкатегорій {current_category.title()}: {exc}"
+            )
+            return False
+
+        for subcat in subcategories:
+            clean = subcat.title().removeprefix("Категорія:")
+
+            if not walk(
+                subcat,
+                depth + 1,
+                current_path + [clean],
+            ):
+                return False
+
+        return True
+
+    for path in new_paths:
+        parts = path.split(" > ")
+        depth = len(parts) - 1
+
+        if depth <= MAX_CATEGORY_DEPTH:
+            if not walk(category, depth, parts):
+                return False
+
+    return True
 
 def iso_now():
     return (
@@ -490,164 +919,107 @@ def iso_now():
     )
 
 
-def get_recent_changes(
-    since_timestamp
-):
+def get_recent_changes(since_timestamp):
     """
-    Отримує лише зміни, які реально можуть
-    впливати на наш портал:
+    Отримує лише зміни, які реально можуть впливати на портал:
 
-    - categorize: додавання/видалення сторінок із категорій
-    - edit/new у просторі Вікіпедія для архівів «Чи знаєте ви»
+    1) categorize у просторах статей і категорій;
+    2) edit/new у просторі Вікіпедія для архівів «Чи знаєте ви».
 
-    Це значно зменшує кількість API-запитів.
+    Два окремі запити не тягнуть звичайні редагування статей,
+    які нам для provenance не потрібні.
     """
-
     if not since_timestamp:
         return []
 
-    changes = []
-    rccontinue = None
+    def fetch(params):
+        result = []
+        rccontinue = None
 
-    while True:
-        params = {
-            "action": "query",
-            "list": "recentchanges",
-            "rcstart": since_timestamp,
-            "rcdir": "newer",
-            "rclimit": "max",
+        while True:
+            request_params = {
+                "action": "query",
+                "list": "recentchanges",
+                "rcstart": since_timestamp,
+                "rcdir": "newer",
+                "rclimit": "max",
+                "rcprop": "title|timestamp|ids",
+                **params,
+            }
 
-            # Нам потрібні:
-            # 0  = статті
-            # 4  = Вікіпедія
-            # 14 = категорії
-            "rcnamespace": "0|4|14",
+            if rccontinue:
+                request_params["rccontinue"] = rccontinue
 
-            # Ключова оптимізація:
-            # не тягнемо всі звичайні редагування статей.
-            "rctype": "categorize|edit|new",
+            data = SITE.simple_request(**request_params).submit()
 
-            "rcprop": (
-                "title|timestamp|ids"
-            ),
-        }
-
-        if rccontinue:
-            params[
-                "rccontinue"
-            ] = rccontinue
-
-        request = SITE.simple_request(
-            **params
-        )
-
-        data = request.submit()
-
-        changes.extend(
-            data.get(
-                "query",
-                {}
-            ).get(
-                "recentchanges",
-                []
+            result.extend(
+                data.get("query", {}).get("recentchanges", [])
             )
-        )
 
-        continuation = data.get(
-            "continue"
-        )
+            continuation = data.get("continue")
+            if not continuation:
+                break
 
-        if not continuation:
-            break
+            rccontinue = continuation.get("rccontinue")
+            if not rccontinue:
+                break
 
-        rccontinue = continuation.get(
-            "rccontinue"
-        )
+        return result
 
-        if not rccontinue:
-            break
+    changes = []
 
+    # Зміни членства у категоріях.
+    changes.extend(
+        fetch({
+            "rcnamespace": "0|14",
+            "rctype": "categorize",
+        })
+    )
+
+    # Редагування архівів «Чи знаєте ви».
+    changes.extend(
+        fetch({
+            "rcnamespace": "4",
+            "rctype": "edit|new",
+        })
+    )
+
+    changes.sort(key=lambda item: item.get("timestamp", ""))
     return changes
 
+def analyse_changes(changes, provenance, facts_cache):
+    """
+    Лише класифікує RecentChanges.
 
-# ---------------------------------------------------------
-# DETECT RELEVANT CHANGES
-# ---------------------------------------------------------
-
-def analyse_changes(
-    changes,
-    provenance,
-    facts_cache
-):
+    Важливо: на цьому етапі ми НЕ вирішуємо, що будь-яка
+    змінена категорія належить до нашого тематичного дерева.
+    Це перевіряється окремо, щоб випадкова категорія не могла
+    запустити повний rebuild provenance.
+    """
     changed_archives = set()
-
-    provenance_dirty = False
-
-    tracked_articles = set(
-        provenance.keys()
-    )
-
-    tracked_categories = (
-        get_tracked_categories(
-            provenance
-        )
-    )
+    dirty_articles = set()
+    dirty_categories = set()
 
     for change in changes:
-        title = change.get(
-            "title",
-            ""
-        )
+        title = change.get("title", "")
+        change_type = change.get("type", "")
 
-        # -----------------------------
-        # DYK ARCHIVE
-        # -----------------------------
-
-        if title.startswith(
-            ARCHIVE_PREFIX_FULL
-        ):
-            if not title.endswith(
-                "/Шаблон"
-            ):
-                changed_archives.add(
-                    title
-                )
-
+        if title.startswith(ARCHIVE_PREFIX_FULL):
+            if not title.endswith("/Шаблон"):
+                changed_archives.add(title)
             continue
 
-        # -----------------------------
-        # CATEGORY CHANGE
-        # -----------------------------
-
-        if title.startswith(
-            "Категорія:"
-        ):
-            if title in tracked_categories:
-                provenance_dirty = True
-
+        if change_type != "categorize":
             continue
 
-        # -----------------------------
-        # ARTICLE CHANGE
-        # -----------------------------
-
-        if ":" in title:
+        if title.startswith("Категорія:"):
+            dirty_categories.add(title)
             continue
 
-        # Зміни категоризації приходять окремим
-        # recentchanges type="categorize".
-        if change.get("type") == "categorize":
-            provenance_dirty = True
+        if ":" not in title:
+            dirty_articles.add(title)
 
-    return (
-        changed_archives,
-        provenance_dirty
-    )
-
-
-# ---------------------------------------------------------
-# FACT RELEVANCE
-# ---------------------------------------------------------
+    return changed_archives, dirty_articles, dirty_categories
 
 def article_paths(
     article,
@@ -966,7 +1338,8 @@ def main():
 
         (
             changed_archives,
-            provenance_dirty
+            dirty_articles,
+            dirty_categories
         ) = analyse_changes(
             changes,
             provenance,
@@ -1007,21 +1380,76 @@ def main():
         # PROVENANCE ONLY IF NEEDED
         # -----------------------------
 
-        if provenance_dirty:
+        relevant_dirty_categories = classify_dirty_categories(
+            dirty_categories,
+            provenance,
+        )
+
+        if relevant_dirty_categories is None:
             print(
-                "\nВиявлено зміни "
-                "тематичної категоризації."
+                "\nНе вдалося безпечно перевірити тематичні "
+                "категорії. last_sync не буде оновлено."
+            )
+            return
+
+        category_paths = build_category_paths(provenance)
+
+        relevant_dirty_articles = classify_dirty_articles(
+            dirty_articles,
+            provenance,
+            category_paths,
+        )
+
+        if relevant_dirty_articles is None:
+            print(
+                "\nНе вдалося безпечно перевірити тематичні "
+                "статті. last_sync не буде оновлено."
+            )
+            return
+
+        if relevant_dirty_categories or relevant_dirty_articles:
+            print(
+                "\nРелевантні зміни тематичної категоризації:"
+            )
+            print(
+                f"  статей: {len(relevant_dirty_articles)}"
+            )
+            print(
+                f"  категорій: {len(relevant_dirty_categories)}"
             )
 
-            provenance = (
-                build_provenance()
-            )
+            for category_title in relevant_dirty_categories:
+                print(f"Оновлюю гілку: {category_title}")
 
+                if not refresh_category_branch(
+                    category_title,
+                    provenance,
+                ):
+                    print(
+                        "\nПомилка інкрементального оновлення "
+                        "provenance. last_sync не буде оновлено."
+                    )
+                    return
+
+            category_paths = build_category_paths(provenance)
+
+            for title in relevant_dirty_articles:
+                if not refresh_article_provenance(
+                    title,
+                    provenance,
+                    category_paths,
+                ):
+                    print(
+                        "\nПомилка інкрементального оновлення "
+                        "статті. last_sync не буде оновлено."
+                    )
+                    return
+
+            save_json(PROVENANCE_CACHE, provenance)
+
+            print("Provenance оновлено інкрементально.")
         else:
-            print(
-                "Тематичне дерево "
-                "не змінилося."
-            )
+            print("Тематичне дерево не змінилося.")
 
     else:
         print(
