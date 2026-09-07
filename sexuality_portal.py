@@ -49,6 +49,13 @@ PROVENANCE_CACHE = (
     CACHE_DIR / "thematic_provenance.json"
 )
 
+RECOGNIZED_CACHE = (
+    CACHE_DIR / "recognized_articles.json"
+)
+
+FEATURED_LIST_PAGE = "Вікіпедія:Вибрані статті"
+GOOD_LIST_PAGE = "Вікіпедія:Добрі статті"
+
 FACTS_BY_PAGE_CACHE = (
     CACHE_DIR / "facts_by_page.json"
 )
@@ -199,6 +206,108 @@ def save_json(path, data):
         ),
         encoding="utf-8"
     )
+
+def load_recognized_cache():
+    return load_json(
+        RECOGNIZED_CACHE,
+        {
+            "featured": [],
+            "good": [],
+        }
+    )
+
+
+def fetch_article_links_from_page(page_title):
+    """
+    Повертає всі посилання з указаного службового списку
+    на сторінки основного простору назв.
+
+    Один такий список читається через MediaWiki API
+    пакетно самим Pywikibot, без окремого запиту на кожну статтю.
+    """
+    page = pywikibot.Page(
+        SITE,
+        page_title
+    )
+
+    try:
+        return {
+            normalize_title(linked_page.title())
+            for linked_page in page.linkedPages(
+                namespaces=0
+            )
+        }
+    except Exception as exc:
+        print(
+            f"Не вдалося прочитати {page_title}: {exc}"
+        )
+        return None
+
+
+def update_recognized_cache(provenance):
+    """
+    Формує тематичний список вибраних і добрих статей.
+
+    Джерелом статусу є два штатні списки української
+    Вікіпедії. Після їх завантаження перетин із тематичним
+    provenance виконується локально.
+    """
+    cache = load_recognized_cache()
+
+    print(
+        "\nОновлюю список відзначених статей..."
+    )
+
+    featured_links = fetch_article_links_from_page(
+        FEATURED_LIST_PAGE
+    )
+    good_links = fetch_article_links_from_page(
+        GOOD_LIST_PAGE
+    )
+
+    if featured_links is None or good_links is None:
+        print(
+            "Не вдалося оновити відзначені статті; "
+            "залишаю попередній кеш."
+        )
+        return cache
+
+    thematic_titles = set(
+        provenance.keys()
+    )
+
+    featured = sorted(
+        thematic_titles & featured_links
+    )
+
+    # Якщо стаття раптом присутня в обох службових списках,
+    # показуємо її лише як вибрану — це вищий статус.
+    good = sorted(
+        (thematic_titles & good_links)
+        - set(featured)
+    )
+
+    cache = {
+        "featured": featured,
+        "good": good,
+    }
+
+    save_json(
+        RECOGNIZED_CACHE,
+        cache
+    )
+
+    print(
+        "Відзначені статті:"
+    )
+    print(
+        f"  вибраних: {len(featured)}"
+    )
+    print(
+        f"  добрих: {len(good)}"
+    )
+
+    return cache
 
 
 # ---------------------------------------------------------
@@ -1460,6 +1569,14 @@ def main():
             "Поточні кеші використано "
             "як стартову точку."
         )
+
+    # ---------------------------------
+    # RECOGNIZED CONTENT
+    # ---------------------------------
+
+    recognized = update_recognized_cache(
+        provenance
+    )
 
     # ---------------------------------
     # FILTER
