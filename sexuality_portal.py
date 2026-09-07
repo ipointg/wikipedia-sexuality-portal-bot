@@ -55,6 +55,7 @@ RECOGNIZED_CACHE = (
 
 FEATURED_LIST_PAGE = "Вікіпедія:Вибрані статті"
 GOOD_LIST_PAGE = "Вікіпедія:Добрі статті"
+RECOGNIZED_PAGE = "Портал:Сексуальність/Відзначений вміст"
 
 FACTS_BY_PAGE_CACHE = (
     CACHE_DIR / "facts_by_page.json"
@@ -309,6 +310,72 @@ def update_recognized_cache(provenance):
 
     return cache
 
+
+def update_recognized_page(recognized):
+    featured = recognized.get("featured", [])
+    good = recognized.get("good", [])
+
+    lines = []
+
+    lines.append(
+        '<div class="sexuality-recognized-list">'
+    )
+
+    for article in featured:
+        lines.append(
+            '<div class="sexuality-recognized-item">'
+            '[[Файл:UAWiki24 style golden star.svg|18px|'
+            'link=Вікіпедія:Вибрані статті|Вибрана стаття]] '
+            f'[[{article}]]'
+            '</div>'
+        )
+
+    for article in good:
+        lines.append(
+            '<div class="sexuality-recognized-item">'
+            '[[Файл:UAWiki24 style blue star.svg|18px|'
+            'link=Вікіпедія:Добрі статті|Добра стаття]] '
+            f'[[{article}]]'
+            '</div>'
+        )
+
+    lines.append("</div>")
+    lines.append("")
+    lines.append("<noinclude>")
+    lines.append(
+        "[[Категорія:Портал:Сексуальність]]"
+    )
+    lines.append("</noinclude>")
+
+    new_text = "\n".join(lines)
+
+    page = pywikibot.Page(
+        SITE,
+        RECOGNIZED_PAGE
+    )
+
+    if (
+        page.exists()
+        and page.text.strip()
+        == new_text.strip()
+    ):
+        print(
+            "Відзначений вміст не змінився."
+        )
+        return
+
+    page.text = new_text
+
+    page.save(
+        summary=(
+            "Автоматичне оновлення "
+            "відзначеного вмісту порталу"
+        )
+    )
+
+    print(
+        "Відзначений вміст оновлено."
+    )
 
 # ---------------------------------------------------------
 # WIKILINK PARSING
@@ -1577,6 +1644,15 @@ def main():
     recognized = update_recognized_cache(
         provenance
     )
+
+    if not update_recognized_page(
+        recognized
+    ):
+        print(
+            "\nСторінку відзначених статей не оновлено. "
+            "last_sync не буде оновлено."
+        )
+        return
 
     # ---------------------------------
     # FILTER
