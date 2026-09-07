@@ -57,6 +57,23 @@ FEATURED_LIST_PAGE = "Вікіпедія:Вибрані статті"
 GOOD_LIST_PAGE = "Вікіпедія:Добрі статті"
 RECOGNIZED_PAGE = "Портал:Сексуальність/Відзначений вміст"
 
+RANDOM_ARTICLE_CANDIDATES_PAGE = (
+    "Портал:Сексуальність/Випадкова стаття/Кандидати"
+)
+
+RANDOM_ARTICLE_BASE_CANDIDATES = [
+    "Сексуальність людини",
+    "Сексологія",
+    "Еротика",
+    "Порнографія",
+    "Сексуальна орієнтація",
+    "Сексуальний потяг",
+    "Сексуальне збудження",
+    "Сексуальна поведінка людини",
+    "Сексуальне здоров'я",
+    "Гендерна ідентичність",
+]
+
 FACTS_BY_PAGE_CACHE = (
     CACHE_DIR / "facts_by_page.json"
 )
@@ -312,70 +329,136 @@ def update_recognized_cache(provenance):
 
 
 def update_recognized_page(recognized):
+    """Оновлює картку «Відзначений вміст» на порталі."""
     featured = recognized.get("featured", [])
     good = recognized.get("good", [])
 
     lines = []
 
-    lines.append(
-        '<div class="sexuality-recognized-list">'
-    )
+    if featured or good:
+        lines.append('<div class="sexuality-recognized-list">')
 
-    for article in featured:
+        for title in featured:
+            lines.append(
+                '<div class="sexuality-recognized-item">'
+                '[[Файл:UAWiki24 style golden star.svg|18px|'
+                'link=Вікіпедія:Вибрані статті|Вибрана стаття]] '
+                f'[[{title}]]'
+                '</div>'
+            )
+
+        for title in good:
+            lines.append(
+                '<div class="sexuality-recognized-item">'
+                '[[Файл:UAWiki24 style blue star.svg|18px|'
+                'link=Вікіпедія:Добрі статті|Добра стаття]] '
+                f'[[{title}]]'
+                '</div>'
+            )
+
+        lines.append('</div>')
+    else:
         lines.append(
-            '<div class="sexuality-recognized-item">'
-            '[[Файл:UAWiki24 style golden star.svg|18px|'
-            'link=Вікіпедія:Вибрані статті|Вибрана стаття]] '
-            f'[[{article}]]'
-            '</div>'
+            "Наразі серед статей тематичного дерева порталу "
+            "немає відзначених статей."
         )
 
-    for article in good:
-        lines.append(
-            '<div class="sexuality-recognized-item">'
-            '[[Файл:UAWiki24 style blue star.svg|18px|'
-            'link=Вікіпедія:Добрі статті|Добра стаття]] '
-            f'[[{article}]]'
-            '</div>'
-        )
-
-    lines.append("</div>")
-    lines.append("")
-    lines.append("<noinclude>")
-    lines.append(
-        "[[Категорія:Портал:Сексуальність]]"
-    )
-    lines.append("</noinclude>")
+    lines.extend([
+        "",
+        "<noinclude>",
+        "[[Категорія:Портал:Сексуальність]]",
+        "</noinclude>",
+    ])
 
     new_text = "\n".join(lines)
+    page = pywikibot.Page(SITE, RECOGNIZED_PAGE)
 
-    page = pywikibot.Page(
-        SITE,
-        RECOGNIZED_PAGE
-    )
-
-    if (
-        page.exists()
-        and page.text.strip()
-        == new_text.strip()
-    ):
+    try:
+        current_text = page.text
+    except Exception as exc:
         print(
-            "Відзначений вміст не змінився."
+            "Не вдалося прочитати сторінку "
+            f"відзначеного вмісту: {exc}"
         )
-        return
+        return False
+
+    if current_text.strip() == new_text.strip():
+        print("Відзначений вміст не змінився.")
+        return True
 
     page.text = new_text
 
-    page.save(
-        summary=(
-            "Автоматичне оновлення "
-            "відзначеного вмісту порталу"
+    try:
+        page.save(
+            summary=(
+                "Автоматичне оновлення "
+                "відзначеного вмісту порталу"
+            )
         )
+    except Exception as exc:
+        print(
+            "Не вдалося оновити сторінку "
+            f"відзначеного вмісту: {exc}"
+        )
+        return False
+
+    print("Сторінку відзначеного вмісту оновлено.")
+    return True
+
+
+def update_random_article_candidates(recognized):
+    """Оновлює пул випадкової статті базовими та відзначеними статтями."""
+    candidates = set(RANDOM_ARTICLE_BASE_CANDIDATES)
+    candidates.update(recognized.get("featured", []))
+    candidates.update(recognized.get("good", []))
+
+    candidates = sorted(candidates, key=str.casefold)
+
+    new_text = "\n".join(
+        f"* [[{title}]]"
+        for title in candidates
     )
 
+    page = pywikibot.Page(SITE, RANDOM_ARTICLE_CANDIDATES_PAGE)
+
+    try:
+        current_text = page.text
+    except Exception as exc:
+        print(
+            "Не вдалося прочитати кандидатів "
+            f"випадкової статті: {exc}"
+        )
+        return False
+
+    if current_text.strip() == new_text.strip():
+        print(
+            "Кандидати випадкової статті не змінилися "
+            f"({len(candidates)})."
+        )
+        return True
+
+    page.text = new_text
+
+    try:
+        page.save(
+            summary=(
+                "Автоматичне оновлення кандидатів "
+                "випадкової статті порталу"
+            )
+        )
+    except Exception as exc:
+        print(
+            "Не вдалося оновити кандидатів "
+            f"випадкової статті: {exc}"
+        )
+        return False
+
     print(
-        "Відзначений вміст оновлено."
+        "Кандидатів випадкової статті оновлено: "
+        f"{len(candidates)}"
     )
+    return True
+
 
 # ---------------------------------------------------------
 # WIKILINK PARSING
@@ -1650,6 +1733,15 @@ def main():
     ):
         print(
             "\nСторінку відзначених статей не оновлено. "
+            "last_sync не буде оновлено."
+        )
+        return
+
+    if not update_random_article_candidates(
+        recognized
+    ):
+        print(
+            "\nКандидатів випадкової статті не оновлено. "
             "last_sync не буде оновлено."
         )
         return
